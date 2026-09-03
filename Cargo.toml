@@ -1,0 +1,19 @@
+[package]
+name = "polymorphic"
+version = "0.1.0"
+description = "Ad-hoc polymorphic function generator"
+edition = "2024"
+documentation = "https://docs.rs/polymorphic"
+repository = "https://github.com/bobbothe2nd/polymorphic"
+readme = "README.md"
+license = "MIT"
+keywords = ["portable", "macro", "polymorphism", "function"]
+categories = ["rust-patterns"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }
