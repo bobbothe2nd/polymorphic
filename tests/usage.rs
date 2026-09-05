@@ -56,3 +56,27 @@ fn by_output() {
     assert_eq!(a, 0);
     assert_eq!(b, 2.0);
 }
+
+polymorphic! {
+    fn bar(a, b) [usize, usize] -> match {
+        usize (u32, u64) [3, N] => {
+            const {
+                assert!(N == 2);
+            }
+
+            ((a as u64) + b) as usize
+        }
+        [u8; N] (u64, [u8; N]) [N, 0] => { b }
+        usize (u64, u32) [_, 4] => { (a - (b as u64)) as usize }
+        usize (u32, u32) [2, 4] => { (a - b) as usize }
+    }
+}
+
+#[test]
+fn by_const() {
+    let a: usize = bar(1u32, 2u32);
+    let b: [u8; 8] = bar(0, [3; 8]);
+
+    assert_eq!(a, 3);
+    assert_eq!(b, [3; 8]);
+}

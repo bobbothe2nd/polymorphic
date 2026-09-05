@@ -6,22 +6,19 @@
 //! in variants, and produce a usable function that is generic over all inputs and
 //! outputs.
 
-use proc_macro::TokenStream;
-use proc_macro2::{Ident, Span, TokenTree};
+use proc_macro::TokenStream as TokenStream1;
+use proc_macro2::{Ident, Span, TokenTree, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Block, Error, Pat, Result, Token, Type, braced, parenthesized,
-    parse::{Parse, ParseStream},
-    parse_macro_input,
-    punctuated::Punctuated,
-    spanned::Spanned,
+    Attribute, Block, Error, Expr, Pat, Result, Token, Type, braced, bracketed, parenthesized, parse::{Parse, ParseStream}, parse_macro_input, parse_quote, punctuated::Punctuated, spanned::Spanned, token::Bracket,
 };
 
 struct PolymorphicFn {
     attrs: Vec<Attribute>,
-    qualifiers: proc_macro2::TokenStream,
+    qualifiers: TokenStream,
     name: Ident,
     args: Vec<Pat>,
+    const_types: Vec<Type>,
     variants: Vec<Variant>,
 }
 
@@ -29,7 +26,7 @@ impl Parse for PolymorphicFn {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let attrs = Attribute::parse_outer(input)?;
 
-        let mut qualifiers = proc_macro2::TokenStream::new();
+        let mut qualifiers = TokenStream::new();
 
         while !input.peek(Token![fn]) {
             if input.peek(Token![const]) {
@@ -53,6 +50,17 @@ impl Parse for PolymorphicFn {
             Punctuated::<Pat, Token![,]>::parse_terminated_with(&args_content, Pat::parse_single)?
                 .into_iter()
                 .collect::<Vec<_>>();
+
+        let const_types = if input.peek(Bracket) {
+            let const_types;
+            bracketed!(const_types in input);
+
+            Punctuated::<Type, Token![,]>::parse_terminated(&const_types)?
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         input.parse::<Token![->]>()?;
         input.parse::<Token![match]>()?;
@@ -83,6 +91,28 @@ impl Parse for PolymorphicFn {
                 ));
             }
 
+            let consts = if variants_content.peek(Bracket) {
+                let consts;
+                bracketed!(consts in variants_content);
+
+                Punctuated::<Expr, Token![,]>::parse_terminated(&consts)?
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            if consts.len() != const_types.len() {
+                return Err(Error::new(
+                    ty.span(),
+                    format!(
+                        "expected {} constant values, found {}",
+                        const_types.len(),
+                        consts.len()
+                    ),
+                ));
+            }
+
             variants_content.parse::<Token![=>]>()?;
 
             let body: Block = variants_content.parse()?;
@@ -90,6 +120,7 @@ impl Parse for PolymorphicFn {
             let variant = Variant {
                 ty,
                 args: variant_args,
+                consts,
                 body,
             };
 
@@ -108,6 +139,7 @@ impl Parse for PolymorphicFn {
             qualifiers,
             name,
             args: fn_args,
+            const_types,
             variants,
         })
     }
@@ -117,6 +149,7 @@ struct Variant {
     ty: Type,
     args: Vec<Type>,
     body: Block,
+    consts: Vec<Expr>,
 }
 
 impl PartialEq for Variant {
@@ -180,6 +213,25 @@ impl Parse for Polymorphic {
 /// }
 /// ```
 ///
+/// You can also specify constants:
+/// 
+/// ```rust
+/// polymorphic! {
+///     fn bar(a, b) [usize, usize] -> match {
+///         usize (u32, u64) [3, N] => {
+///             const {
+///                 assert!(N == 2);
+///             }
+/// 
+///             ((a as u64) + b) as usize
+///         }
+///         [u8; N] (u64, [u8; N]) [N, 0] => { b }
+///         usize (u64, u32) [_, 4] => { (a - (b as u64)) as usize }
+///         usize (u32, u32) [2, 4] => { (a - b) as usize }
+///     }
+/// }
+/// ```
+///
 /// Internally uses a trait.
 ///
 /// # Safety
@@ -187,10 +239,10 @@ impl Parse for Polymorphic {
 /// This lets you define unsafe functions, even with `#[forbid(unsafe_code)]`.
 /// Not actually unsound, it won't let you do anything unsafe in safe code still.
 #[proc_macro]
-pub fn polymorphic(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as Polymorphic);
+pub fn polymorphic(input: TokenStream1) -> TokenStream1 {
+    let mut input = parse_macro_input!(input as Polymorphic);
 
-    let functions = input.functions.iter().map(expand_function);
+    let functions = input.functions.iter_mut().map(expand_function);
 
     quote! {
         #(#functions)*
@@ -198,12 +250,13 @@ pub fn polymorphic(input: TokenStream) -> TokenStream {
     .into()
 }
 
-fn expand_function(function: &PolymorphicFn) -> proc_macro2::TokenStream {
+fn expand_function(function: &mut PolymorphicFn) -> TokenStream {
     let PolymorphicFn {
         attrs,
         qualifiers,
         name,
         args,
+        const_types,
         variants,
     } = function;
 
@@ -216,23 +269,59 @@ fn expand_function(function: &PolymorphicFn) -> proc_macro2::TokenStream {
         match arg {
             Pat::Ident(pat) => arg_names.push(pat.ident.clone()),
 
-            pat => {
-                return Error::new(
-                    pat.span(),
-                    "polymorphic function arguments must be identifiers",
-                )
-                .into_compile_error();
-            }
+            pat => return Error::new(
+                pat.span(),
+                "polymorphic function arguments must be identifiers",
+            )
+            .into_compile_error(),
         }
     }
 
-    let impls = variants.iter().map(|variant| {
+    let mut const_names = Vec::with_capacity(const_types.len());
+
+    let start = b'A' as usize + arg_names.len();
+
+    for (i, b) in (start..(start + const_types.len())).enumerate() {
+        match str::from_utf8(&[b'_', b'_', b as u8]) {
+            Ok(char) => const_names.push(Ident::new(char, const_types[i].span())),
+            Err(_) => return Error::new(
+                Span::call_site(),
+                "too many polymorphic constants"
+            ).into_compile_error(),
+        }
+    }
+
+    let impls = variants.iter_mut().map(|variant| {
         let ty = &variant.ty;
         let variant_args = &variant.args;
+        let variant_consts = &mut variant.consts;
         let body = &variant.body;
 
+        let mut impl_consts = Vec::new();
+    
+        for (i, expr) in variant_consts.iter_mut().enumerate() {
+            match expr {
+                Expr::Infer(_) => {
+                    let name = &const_names[i];
+                    let ty = &const_types[i];
+
+                    impl_consts.push(quote!(const #name: #ty));
+                    *expr = parse_quote!(#name);
+                }
+
+                Expr::Path(path) if path.path.segments.len() == 1 => {
+                    let name = &path.path.segments[0].ident;
+                    let ty = &const_types[i];
+
+                    impl_consts.push(quote!(const #name: #ty));
+                }
+
+                _ => {}
+            }
+        }
+
         quote! {
-            impl #trait_name<#(#variant_args),*> for #ty {
+            impl<#(#impl_consts),*> #trait_name<#(#variant_consts,)* #(#variant_args),*> for #ty {
                 #[inline]
                 #[allow(unused_variables)]
                 fn #method_name(
@@ -247,7 +336,14 @@ fn expand_function(function: &PolymorphicFn) -> proc_macro2::TokenStream {
     quote! {
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        trait #trait_name<#(#arg_names),*> {
+        trait #trait_name<
+            #(
+                const #const_names: #const_types,
+            )*
+            #(
+                #arg_names,
+            )*
+        > {
             fn #method_name(
                 #(
                     #arg_names: #arg_names
@@ -260,16 +356,37 @@ fn expand_function(function: &PolymorphicFn) -> proc_macro2::TokenStream {
         #(#attrs)*
         #[allow(private_bounds)]
         #[allow(non_camel_case_types)]
-        #qualifiers fn #name<#(#arg_names,)* V>(
+        #qualifiers fn #name<
+            #(
+                const #const_names: #const_types,
+            )*
+            #(
+                #arg_names,
+            )*
+            V
+        >(
             #(
                 #arg_names: #arg_names
             ),*
         ) -> V
         where
-            V: #trait_name<#(#arg_names),*>,
+            V: #trait_name<
+                #(
+                    #const_names,
+                )*
+                #(
+                    #arg_names,
+                )*
+            >,
         {
-            <V as #trait_name<#(#arg_names),*>>::
-                #method_name(#(#arg_names),*)
+            <V as #trait_name<
+                #(
+                    #const_names,
+                )*
+                #(
+                    #arg_names,
+                )*
+            >>::#method_name(#(#arg_names),*)
         }
     }
 }

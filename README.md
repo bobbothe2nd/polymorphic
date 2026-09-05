@@ -29,6 +29,27 @@ fn main() {
 }
 ```
 
+or use constants:
+
+```rust
+polymorphic::polymorphic! {
+    fn bar(a, b) [usize, usize] -> match {
+        usize (u32, u64) [3, N] => {
+            const {
+                assert!(N == 2);
+            }
+
+            ((a as u64) + b) as usize
+        }
+        [u8; N] (u64, [u8; N]) [N, 0] => { b }
+        usize (u64, u32) [_, 4] => { (a - (b as u64)) as usize }
+        usize (u32, u32) [2, 4] => { (a - b) as usize }
+    }
+}
+```
+
+This macro is useful when defining a function that must be generic over only a few types or constants with no required traits. If you require the use of a trait that is implemented by users, this is not for you. If you need to be generic over mostly primitive types or explicit dependencies, `polymorphic` can make your code look much cleaner. Constants make this macro more usable when you need to be generic over them, but don't restrict the macro.
+
 ## Codegen
 
 This macro invocation:
@@ -47,20 +68,20 @@ is roughly equal to this hand-written code:
 
 ```rust
 trait __foo_trait_internal<T, U> {
-    fn __foo_internal(a: T, b: U) -> Self;
+    fn __foo_internal(a: T, b: U) -> usize;
 }
 
 impl __foo_trait_internal<u32, u64> for usize {
     #[inline]
-    fn __foo_internal(a: u32, b: u64) -> Self {
-        ((a as u64) + b) as Self
+    fn __foo_internal(a: u32, b: u64) -> usize {
+        ((a as u64) + b) as usize
     }
 }
 
 impl __foo_trait_internal<u64, u32> for usize {
     #[inline]
-    fn __foo_internal(a: u64, b: u32) -> Self {
-        (a - (b as u64)) as Self
+    fn __foo_internal(a: u64, b: u32) -> usize {
+        (a - (b as u64)) as usize
     }
 }
 

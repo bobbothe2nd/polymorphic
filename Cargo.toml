@@ -1,6 +1,6 @@
 [package]
 name = "polymorphic"
-version = "0.1.0"
+version = "0.1.1"
 description = "Ad-hoc polymorphic function generator"
 edition = "2024"
 documentation = "https://docs.rs/polymorphic"
